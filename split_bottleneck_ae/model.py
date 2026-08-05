@@ -10,8 +10,8 @@ pretrained raw-AE weights load directly into this model — the key names
 `encoder.{0,2,4}.weight` and `decoder.{0,2,4}.weight` match the raw AE's
 state dict.
 
-The encoder emits a (N, 64, 18, 514) spatial feature map (see
-`project-conv-ae-shape` memory). No recon-side bottleneck is inserted —
+The encoder emits a (N, 64, 16, 512) spatial feature map (padding='same'
+throughout — see `project-conv-ae-shape` memory). No recon-side bottleneck is inserted —
 ``feat`` feeds the decoder directly, so the pretrained raw-AE inverse
 holds from step zero. Two task-side bottlenecks branch off ``feat``:
 
@@ -53,8 +53,23 @@ import torch.nn.functional as F
 # the pretrained raw-AE state_dict loads with matching key names.
 # --------------------------------------------------------------------------
 def _build_encoder() -> nn.Sequential:
+    # All three convs use padding=1 (keras 'same' for a 3x3 kernel) so the
+    # spatial dims stay at (rows, cols) end-to-end. This is what hls4ml
+    # accepts on the FPGA side — the previous padding=2 on the first conv
+    # translated to a ZeroPadding2D layer that the target toolchain can't
+    # ingest.
+    #
+    # Old padding=2 layout, kept for reference / rollback:
+    #     nn.Conv2d(1, 16, kernel_size=3, padding=2),   # grew H,W by +2
+    #     nn.ReLU(),
+    #     nn.Conv2d(16, 32, kernel_size=3, padding=1),
+    #     nn.ReLU(),
+    #     nn.Conv2d(32, 64, kernel_size=3, padding=1),
+    #     nn.ReLU(),
+    # Encoder feature under that layout was (64, 18, 514); adapter
+    # input_width was cols + 2. Run tag: split_bottleneck_ae_v1_fixedpool1d_repro.
     return nn.Sequential(
-        nn.Conv2d(1, 16, kernel_size=3, padding=2),
+        nn.Conv2d(1, 16, kernel_size=3, padding=1),
         nn.ReLU(),
         nn.Conv2d(16, 32, kernel_size=3, padding=1),
         nn.ReLU(),
@@ -64,12 +79,23 @@ def _build_encoder() -> nn.Sequential:
 
 
 def _build_decoder(output_activation: Optional[nn.Module]) -> nn.Sequential:
+    # Mirror of the encoder — every ConvTranspose2d uses padding=1 so the
+    # decoder is 'same' throughout and returns (rows, cols).
+    #
+    # Old padding=2 layout, kept for reference / rollback:
+    #     nn.ConvTranspose2d(64, 32, kernel_size=3, padding=1),
+    #     nn.ReLU(),
+    #     nn.ConvTranspose2d(32, 16, kernel_size=3, padding=1),
+    #     nn.ReLU(),
+    #     nn.ConvTranspose2d(16, 1, kernel_size=3, padding=2),  # shrank H,W by -2
+    # Paired with the padding=2 first encoder conv to bring (18, 514) back
+    # to (rows, cols) at the output.
     layers: List[nn.Module] = [
         nn.ConvTranspose2d(64, 32, kernel_size=3, padding=1),
         nn.ReLU(),
         nn.ConvTranspose2d(32, 16, kernel_size=3, padding=1),
         nn.ReLU(),
-        nn.ConvTranspose2d(16, 1, kernel_size=3, padding=2),
+        nn.ConvTranspose2d(16, 1, kernel_size=3, padding=1),
     ]
     if output_activation is not None:
         layers.append(output_activation)
@@ -117,7 +143,7 @@ class TimeAdaptivePoolAdapter(nn.Module):
     pool_type="adaptive" uses F.adaptive_avg_pool1d (training-friendly but
     unsupported by hls4ml). pool_type="fixed" uses nn.AvgPool1d with an
     explicit kernel/stride derived from the encoder's W. The fixed op is
-    numerically identical for the values of W we use (514) so the trained
+    numerically identical for the values of W we use (512) so the trained
     weights carry over between the two.
     """
 
@@ -214,9 +240,9 @@ class SplitBottleneckAE(nn.Module):
         # Phase branch: pool the encoder feature along the time axis to a
         # (64 * pool_len)-D vector so the phase heads see coarse "where
         # along the pulse train this happened" info instead of a scalar.
-        # The encoder's first conv is Conv2d(k=3, padding=2) while the next
-        # two use padding=1, so the encoder emits W = cols + 2 columns.
-        encoder_out_width = cols + 2
+        # Every encoder conv now uses padding=1 (keras 'same'), so the
+        # encoder emits W = cols columns unchanged.
+        encoder_out_width = cols
         self.adapter = TimeAdaptivePoolAdapter(
             in_channels=self.ENCODER_OUT_CHANNELS,
             pool_len=int(adapter_pool_len),
@@ -304,7 +330,7 @@ class SplitBottleneckAE(nn.Module):
     ):
         rows, cols = self.input_shape
         x = self._ensure_channel_dim(x)
-        feat = self.encoder(x)  # (N, 64, 18, 514)
+        feat = self.encoder(x)  # (N, 64, 16, 512) with padding='same'
 
         recon = None
         if run_recon:
