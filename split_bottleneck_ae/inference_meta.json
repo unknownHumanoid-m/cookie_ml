@@ -1,0 +1,19 @@
+{
+  "source_checkpoint": "/sdf/home/m/miaed/tmo_exp/tmo101347625/scratch/denoising_runs/split_bottleneck_ae/split_bottleneck_ae_v1_fixedpool1d/model.pth",
+  "full_model_params": 131224,
+  "deployed_subgraph_params": 107991,
+  "dropped_params": 23233,
+  "input_shape": [
+    16,
+    512
+  ],
+  "num_count_classes": 4,
+  "phase_single_output_dim": 2,
+  "phase_two_output_dim": 1,
+  "bottleneck_count_dim": 32,
+  "bottleneck_phase_dim": 48,
+  "adapter_pool_len": 24,
+  "pool_type": "fixed",
+  "min_pulses": 1,
+  "max_pulses": 4
+}
